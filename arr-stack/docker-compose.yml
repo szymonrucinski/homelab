@@ -1,0 +1,332 @@
+services:
+  gluetun:
+    image: qmcgaw/gluetun:latest
+    container_name: gluetun
+    restart: always
+    labels:
+      - "autoheal-app=true"
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - gluetun
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    ports:
+      - 8085:8085   # qBittorrent
+      - 8989:8989   # Sonarr
+      - 7878:7878   # Radarr
+      - 8191:8191   # Flaresolverr
+      - 9696:9696   # Prowlarr
+      - 6767:6767   # Bazarr
+      - 6881:6881   # qBittorrent torrenting
+      - "6881:6881/udp"
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack:/gluetun
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - VPN_SERVICE_PROVIDER=${VPN_PROVIDER}
+      - VPN_TYPE=wireguard
+      - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
+      - FIREWALL_VPN_INPUT_PORTS=6881
+      - SERVER_COUNTRIES=${VPN_COUNTRY}
+      - TZ=${TZ}
+      - LOG_LEVEL=info
+      - DOT=on
+      - DNS_KEEP_NAMESERVER=off
+      - HEALTH_TARGET_ADDRESS=9.9.9.9
+      - HEALTH_VPN_DURATION_INITIAL=30s
+      - HEALTH_VPN_DURATION_ADDITION=10s
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:9999"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          memory: 500M
+          cpus: '0.3'
+        reservations:
+          memory: 100M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.3.21
+    container_name: flaresolverr
+    network_mode: "service:gluetun"
+    environment:
+      - LOG_LEVEL=info
+      - LOG_HTML=false
+      - CAPTCHA_SOLVER=none
+      - TZ=${TZ}
+      - PROMETHEUS_ENABLED=false
+    restart: always
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8191/health"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+          cpus: '0.25'
+        reservations:
+          memory: 150M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=002
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack/prowlarr:/config
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f 'http://localhost:9696/ping' || exit 1"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      flaresolverr:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 400M
+          cpus: '0.4'
+        reservations:
+          memory: 150M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:4.5.5
+    container_name: qbittorrent
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - WEBUI_PORT=8085
+      - UMASK=002
+      - TORRENTING_PORT=6881
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack/qbittorrent:/config
+      - ${MEDIA_ROOT}:/media
+      - ${MEDIA_ROOT}/torrent-downloads:/downloads
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8085 || exit 1"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=002
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack/sonarr:/config
+      - ${MEDIA_ROOT}/shows:/tv
+      - ${MEDIA_ROOT}/torrent-downloads:/downloads
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f 'http://localhost:8989/ping' || exit 1"]
+      interval: 300s
+      timeout: 15s
+      retries: 2
+      start_period: 60s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      prowlarr:
+        condition: service_started
+      qbittorrent:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 800M
+          cpus: '0.6'
+        reservations:
+          memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=002
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack/radarr:/config
+      - ${MEDIA_ROOT}/movies:/movies
+      - ${MEDIA_ROOT}/torrent-downloads:/downloads
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f 'http://localhost:7878/ping' || exit 1"]
+      interval: 300s
+      timeout: 15s
+      retries: 2
+      start_period: 60s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      prowlarr:
+        condition: service_started
+      qbittorrent:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 800M
+          cpus: '0.6'
+        reservations:
+          memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    network_mode: "service:gluetun"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=002
+    volumes:
+      - ${CONFIG_ROOT}/bazarr:/config
+      - ${MEDIA_ROOT}/movies:/movies
+      - ${MEDIA_ROOT}/shows:/tv
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:6767 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 45s
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      sonarr:
+        condition: service_started
+      radarr:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 800M
+          cpus: '0.8'
+        reservations:
+          memory: 300M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  jellyseerr:
+    image: fallenbagel/jellyseerr:latest
+    container_name: jellyseerr
+    networks:
+      - gluetun
+      - jellyfin_default
+    ports:
+      - 5055:5055
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - PUID=${PUID}
+      - PGID=${PGID}
+      - TZ=${TZ}
+      - UMASK=002
+    volumes:
+      - ${CONFIG_ROOT}/arr-stack/jellyseerr:/app/config
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5055 || exit 1"]
+      interval: 120s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    depends_on:
+      sonarr:
+        condition: service_started
+      radarr:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 200M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  gluetun:
+    external: true
+  jellyfin_default:
+    external: true

@@ -1,0 +1,36 @@
+# Environment files with secrets
+.env
+**/.env
+
+# Allow .env.example templates
+!.env.example
+!**/.env.example
+
+# Docker runtime
+*.log
+docker-compose.override.yml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Private keys and certificates
+*.pem
+*.key
+*.crt
+*.pfx
+*.p12
+id_rsa*
+id_ed25519*
+
+# Backup files
+*.bak
+*.backup
+*.old

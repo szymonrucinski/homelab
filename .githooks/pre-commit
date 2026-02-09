@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+#
+# Pre-commit hook: blocks commits containing secrets, API keys, private keys,
+# passwords, or hardcoded user paths.
+#
+# Install:  git config core.hooksPath .githooks
+#    or:    cp .githooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+#
+
+set -euo pipefail
+
+RED='\033[0;31m'
+YLW='\033[1;33m'
+NC='\033[0m'
+
+BLOCKED=0
+
+# ── Patterns that must never appear in committed diffs ──────────────────────
+SECRET_PATTERNS=(
+    # WireGuard / generic private keys
+    'PRIVATE_KEY\s*=\s*[A-Za-z0-9+/=]{20,}'
+    '-----BEGIN.*(PRIVATE|RSA|EC|DSA).*KEY-----'
+
+    # API keys & tokens (hex >=32 chars or base64-ish >=20 chars)
+    'API_KEY\s*[:=]\s*[A-Fa-f0-9]{16,}'
+    '_TOKEN\s*[:=]\s*[A-Za-z0-9_\-]{20,}'
+    '_SECRET\s*[:=]\s*[A-Za-z0-9_\-]{10,}'
+
+    # Passwords with literal values (skip ${VAR} refs and empty assignments)
+    '_PASSWORD\s*[:=]\s+[a-zA-Z0-9][a-zA-Z0-9!@#%^&*_\-]{5,}'
+    'PASSWD\s*[:=]\s+[a-zA-Z0-9][a-zA-Z0-9!@#%^&*_\-]{5,}'
+
+    # Hardcoded home-directory paths
+    '/home/[a-z][a-z0-9_\-]*/'
+
+    # Hardcoded absolute mount paths (common on personal servers)
+    '/mnt/[a-z][a-z0-9_\-]*/'
+
+    # Connection strings with embedded credentials
+    'postgres(ql)?://[^:]+:[^@]+@'
+    'mysql://[^:]+:[^@]+@'
+    'mongodb(\+srv)?://[^:]+:[^@]+@'
+
+    # AWS credentials
+    'AKIA[0-9A-Z]{16}'
+    'aws_secret_access_key\s*=\s*\S+'
+
+    # Generic long hex/base64 that look like secrets (>=40 chars)
+    '(key|secret|token|password)\s*[:=]\s*[A-Za-z0-9+/=_\-]{40,}'
+)
+
+# ── File names that must never be staged ────────────────────────────────────
+BLOCKED_FILE_PATTERNS=(
+    '\.env$'
+    '\.pem$'
+    '\.key$'
+    'id_rsa'
+    'id_ed25519'
+    '\.pfx$'
+    '\.p12$'
+    'credentials\.json$'
+    'service.account\.json$'
+)
+
+echo "[pre-commit] Scanning staged files for secrets..."
+
+# ── Check for blocked file names ───────────────────────────────────────────
+staged_files=$(git diff --cached --name-only --diff-filter=ACM 2>/dev/null || true)
+
+for pattern in "${BLOCKED_FILE_PATTERNS[@]}"; do
+    matches=$(echo "$staged_files" | grep -E "$pattern" 2>/dev/null || true)
+    if [[ -n "$matches" ]]; then
+        while IFS= read -r f; do
+            echo -e "  ${RED}BLOCKED${NC} file: ${YLW}${f}${NC}"
+            echo "          Sensitive file type should not be committed."
+        done <<< "$matches"
+        BLOCKED=1
+    fi
+done
+
+# ── Check staged diffs for secret patterns ─────────────────────────────────
+# Files to skip scanning (the hook itself contains regex patterns that would
+# trigger false positives)
+SKIP_FILES=(".githooks/pre-commit")
+
+for file in $staged_files; do
+    # skip the hook file itself
+    skip=false
+    for sf in "${SKIP_FILES[@]}"; do
+        [[ "$file" == "$sf" ]] && skip=true && break
+    done
+    $skip && continue
+
+    # skip binary files
+    if git diff --cached --numstat "$file" 2>/dev/null | grep -q '^-'; then
+        continue
+    fi
+
+    diff_content=$(git diff --cached -U0 "$file" 2>/dev/null || true)
+
+    for pattern in "${SECRET_PATTERNS[@]}"; do
+        hits=$(echo "$diff_content" | grep -inE "$pattern" 2>/dev/null | head -5 || true)
+        if [[ -n "$hits" ]]; then
+            echo -e "  ${RED}BLOCKED${NC} in ${YLW}${file}${NC}:"
+            echo "          Pattern: $pattern"
+            echo "$hits" | while IFS= read -r line; do
+                # truncate long lines for readability
+                echo "          ${line:0:120}"
+            done
+            BLOCKED=1
+        fi
+    done
+done
+
+# ── Verdict ────────────────────────────────────────────────────────────────
+if [[ $BLOCKED -eq 1 ]]; then
+    echo ""
+    echo -e "${RED}Commit blocked.${NC} Secrets or sensitive data detected."
+    echo "  - Move secrets to .env files (gitignored by default)"
+    echo "  - Use \${VARIABLE} references in docker-compose.yml"
+    echo "  - Run 'git diff --cached' to review what is staged"
+    echo "  - Use 'git commit --no-verify' ONLY if you are sure (not recommended)"
+    exit 1
+fi
+
+echo "[pre-commit] No secrets detected. OK."
+exit 0

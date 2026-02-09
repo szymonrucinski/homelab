@@ -1,0 +1,45 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      - NVIDIA_VISIBLE_DEVICES=all
+    volumes:
+      - ${CONFIG_ROOT}/ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - ollama_default
+    restart: unless-stopped
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - SCARF_NO_ANALYTICS=true
+      - DO_NOT_TRACK=true
+      - ANONYMIZED_TELEMETRY=false
+    volumes:
+      - ${CONFIG_ROOT}/open-webui:/app/backend/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      - ollama
+    networks:
+      - ollama_default
+    restart: unless-stopped
+
+networks:
+  ollama_default:
+    driver: bridge
